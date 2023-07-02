@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.9;
 
-interface IVoting{
-    
-    struct Data{
+interface IVoting {
+    struct Data {
         uint256 price;
         uint256 amount;
     }
