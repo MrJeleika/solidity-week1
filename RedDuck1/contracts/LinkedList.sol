@@ -23,15 +23,19 @@ contract DoublyLinkedList {
         tail = 0;
     }
 
-    function insertAfter(uint256 id, Data calldata data) internal isValidNode(id) returns (uint256 newID) {
-        if (nodes[id].prev != type(uint256).max) {
-            require(nodes[nodes[id].prev].data.amount <= data.amount, "invalid id");
+    function insertAfter(uint256 id, Data memory data) internal isValidNode(id) returns (uint256 newID) {
+        Node storage node = nodes[id];
+
+        if (node.prev != type(uint256).max) {
+            require(nodes[node.prev].data.amount <= data.amount, "Invalid id");
         }
 
         if (nodes[id].next != type(uint256).max) {
-            require(nodes[nodes[id].next].data.amount >= data.amount, "invalid id");
+            require(nodes[node.next].data.amount >= data.amount, "Invalid id");
         }
-        Node storage node = nodes[id];
+
+        require(node.data.amount <= data.amount, "Invalid id");
+
 
         nodes.push(Node({data: data, prev: id, next: node.next}));
 
@@ -48,20 +52,57 @@ contract DoublyLinkedList {
         return newID;
     }
 
-    function increaseAmount(uint256 id, Data calldata data) internal isValidNode(id) {
+    function increaseAmount(uint256 id, Data memory data) internal isValidNode(id) {
         require(nodes[id].data.price == data.price && id != 0, "Invalid data");
         nodes[id].data.amount += data.amount;
     }
 
-    function insertBefore(uint256 id, Data calldata data) internal isValidNode(id) returns (uint256 newID) {
-        return insertAfter(nodes[id].prev, data);
+    function decreaseAmount(uint256 id, Data memory data) internal isValidNode(id) {
+        require(nodes[id].data.price == data.price && id != 0, "Invalid data");
+        nodes[id].data.amount -= data.amount;
+    }
+
+    // Returns index if need smth to change, returns max Uint256 otherwise
+    function findIndexToInsert(uint256 indexOfExistingNode, uint256 amount) internal view returns(uint256, uint256){
+        require(indexOfExistingNode != 0, "invalid index");
+        Node memory currentNode = nodes[indexOfExistingNode];
+        uint256 currAmount = currentNode.data.amount - amount;
+        if(currentNode.prev == type(uint256).max) return (indexOfExistingNode, currAmount);
+        uint256 index = indexOfExistingNode;
+        Node memory prevNode = nodes[uint256(currentNode.prev)];
+        if (prevNode.data.amount > currAmount) {
+            while (prevNode.data.amount > currAmount) {
+                if (prevNode.prev == type(uint256).max) {
+                    currentNode = prevNode;
+                    break;
+                }
+                currentNode = prevNode;
+                prevNode = nodes[currentNode.prev];
+            }
+            index = currentNode.prev;
+        }
+        return (index, currAmount);
     }
 
     function remove(uint256 id) internal isValidNode(id) {
         Node storage node = nodes[id];
 
-        nodes[node.next].prev = node.prev;
-        nodes[node.prev].next = node.next;
+        if(node.next != type(uint256).max && node.prev != type(uint256).max){
+            nodes[node.next].prev = node.prev;
+            nodes[node.prev].next = node.next;
+        }
+        
+        if(node.prev == type(uint256).max){
+            nodes[node.next].prev = type(uint256).max;
+        }
+        if(node.next == type(uint256).max){
+            nodes[node.prev].next = type(uint256).max;
+        }
+        
+
+        if (id == tail) {
+            tail = node.prev;
+        }
 
         delete nodes[id];
     }
@@ -71,22 +112,7 @@ contract DoublyLinkedList {
     }
 
     modifier isValidNode(uint256 id) {
-        require(id == 0 || (id != type(uint).max && id < nodes.length), "Invalid index");
+        require(id == 0 || (id != type(uint).max && id < nodes.length), "Invalid id");
         _;
-    }
-
-    // function checkNodePosition(uint256 id) internal{
-    //     Node memory currNode = nodes[id];
-    //     if(nodes[nodes[id].next].data.amount >= nodes[id].data.amount && nodes[nodes[id].prev].data.amount <= nodes[id].data.amount){
-    //         return;
-    //     }else if(nodes)
-    // }
-
-    function swapNodesData(uint256 node1, uint256 node2) public isValidNode(node1) isValidNode(node2) returns(uint256, uint256) {
-        require(nodes[node1].data.amount > nodes[node2].data.amount, "Invalid data");
-        Data memory temp = nodes[node1].data;
-        nodes[node1].data = nodes[node2].data;
-        nodes[node2].data = temp;
-        
     }
 }

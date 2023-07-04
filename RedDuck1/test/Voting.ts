@@ -4,10 +4,16 @@ import { Voting } from './../typechain-types/Voting';
 import { ethers } from 'hardhat';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 
+interface IData {
+  price: number | bigint;
+  amount: number | bigint;
+}
+
 describe('Voting', () => {
   let owner: HardhatEthersSigner;
   let user: HardhatEthersSigner;
   let user2: HardhatEthersSigner;
+  let user3: HardhatEthersSigner;
   let voting: Voting;
 
   // Get index to insert new node
@@ -32,54 +38,94 @@ describe('Voting', () => {
     return index;
   };
 
-  // Replaces nodes data value changed to bigger than next
-  const recountNodes = async (indexOfExistingNode: number) => {
+  /**
+   * Recount nodes to make list in right sorted order
+   * @param indexOfExistingNode - index of node have to be recounted
+   * @param data - data of that node
+   * @returns [index, amount] - new index to insert data
+   */
+  const recountNodes = async (indexOfExistingNode: number, data: IData) => {
     let nodes = await voting.getNodes();
     let currentNode = nodes[indexOfExistingNode];
-    if (!nodes[Number(currentNode.next)]) return;
+    let index = 0;
+    const currAmount = Number(currentNode.data.amount) + Number(data.amount);
 
-    let nodeToCompare = nodes[Number(currentNode.next)];
-    if (!nodeToCompare.data) return;
+    let prevNode, nextNode;
 
-    while (
-      nodeToCompare &&
-      nodeToCompare.data.amount <= currentNode.data.amount
-    ) {
-      if (currentNode.data.amount > nodeToCompare.data.amount) {
-        await voting.swapNodesData(
-          indexOfExistingNode,
-          Number(currentNode.next),
-        );
-      }
-
-      if (nodeToCompare.next >= BigInt(nodes.length)) {
-        break;
-      }
-
-      currentNode = nodeToCompare;
-      nodeToCompare = nodes[Number(nodeToCompare.next)];
+    if (currentNode[2] === ethers.MaxUint256) {
+      index = Number(nodes[Number(currentNode[1])][2]);
+      prevNode = nodes[Number(currentNode[1])];
+      nextNode = currentNode;
+    } else if (currentNode[1] === ethers.MaxUint256) {
+      index = Number(nodes[Number(currentNode[2])][1]);
+      prevNode = currentNode;
+      nextNode = nodes[Number(currentNode[2])];
+    } else {
+      prevNode = nodes[Number(currentNode[1])];
+      nextNode = nodes[Number(currentNode[2])];
     }
+
+    if (nextNode.data.amount < currAmount) {
+      while (nextNode.data.amount < currAmount) {
+        if (nextNode.next === ethers.MaxUint256) {
+          currentNode = nextNode;
+          break;
+        }
+        currentNode = nextNode;
+        nextNode = nodes[Number(currentNode.next)];
+      }
+      index = Number(nodes[Number(currentNode.prev)].next);
+    } else if (prevNode.data.amount > currAmount) {
+      while (prevNode.data.amount > currAmount) {
+        if (prevNode.prev === ethers.MaxUint256) {
+          currentNode = prevNode;
+          break;
+        }
+        currentNode = prevNode;
+        prevNode = nodes[Number(currentNode.prev)];
+      }
+      index = Number(nodes[Number(currentNode.next)].prev);
+    }
+    return [index, currAmount];
   };
 
   const vote = async (
-    data: any,
-    user: HardhatEthersSigner,
+    data: IData,
+    _user: HardhatEthersSigner,
   ): Promise<boolean> => {
+    if (data.amount < 1 || data.price < 1) return false;
     const nodes = await voting.getNodes();
     // Check if node with this price already exists
     const indexOfExistingNode = nodes.findIndex(
-      (node) => node[0].price === BigInt(data.price),
+      (node) => node.data.price === BigInt(data.price),
     );
 
     // If yes add amount to it and recount
     if (indexOfExistingNode >= 0) {
-      await voting.connect(user).vote(indexOfExistingNode, data, true);
-      await recountNodes(indexOfExistingNode);
+      const [indexToInsert, amount] = await recountNodes(
+        indexOfExistingNode,
+        data,
+      );
+
+      data.amount = amount;
+      if (indexToInsert == indexOfExistingNode) {
+        await voting
+          .connect(_user)
+          .vote(indexToInsert, indexOfExistingNode, data, true);
+      } else {
+        data.amount = amount;
+        await voting
+          .connect(_user)
+          .vote(indexToInsert, indexOfExistingNode, data, true);
+      }
+
       return true;
     }
+
     // Else, get index to insert new node and add it
-    const index = await getIndex(data.amount);
-    await voting.connect(user).vote(index, data, false);
+    const index = await getIndex(Number(data.amount));
+    // 0 just any value
+    await voting.connect(_user).vote(index, 0, data, false);
     return true;
   };
 
@@ -90,7 +136,7 @@ describe('Voting', () => {
   const fee = 5;
 
   beforeEach(async () => {
-    [owner, user, user2] = await ethers.getSigners();
+    [owner, user, user2, user3] = await ethers.getSigners();
     const Voting = await ethers.getContractFactory('Voting', owner);
 
     voting = await Voting.deploy(name, symbol, supply, price, fee);
@@ -160,6 +206,7 @@ describe('Voting', () => {
       await voting.connect(user).buy({
         value: ethers.parseEther('1'),
       });
+
       const balance = await voting.connect(user).balanceOf(user.address);
 
       await voting.connect(user).sell(50000);
@@ -199,18 +246,12 @@ describe('Voting', () => {
       );
     });
 
-    it('Should be reverted when user try to sell voted tokens', async () => {
+    it('Should be reverted to small amount', async () => {
       await voting.connect(user).buy({
-        value: 5000000,
+        value: 500000,
       });
-
-      const data = {
-        amount: 4000000,
-        price: 5,
-      };
-      await vote(data, user);
-      await expect(voting.connect(user).sell(4000000)).to.be.revertedWith(
-        "Can't withdraw tokens while voting",
+      await expect(voting.connect(user).sell(19)).to.be.revertedWith(
+        'Too small amount',
       );
     });
   });
@@ -280,6 +321,8 @@ describe('Voting', () => {
       const nodes = await voting.getNodes();
       const tail = Number(await voting.tail());
       const head = Number(await voting.head());
+      console.log(nodes);
+
       await expect(nodes[tail].data.amount).to.equal(5000n);
       await expect(nodes[Number(nodes[tail].prev)].data.amount).to.equal(70n);
       await expect(nodes[head].data.amount).to.equal(0n);
@@ -288,13 +331,86 @@ describe('Voting', () => {
     it('should have right voting list order', async () => {
       const data = {
         amount: 20,
-        price: 600,
+        price: 604,
       };
       const data2 = {
         amount: 6000,
         price: 60,
       };
       const data3 = {
+        amount: 5000,
+        price: 10,
+      };
+
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      await voting.connect(user3).buy({
+        value: 5000000,
+      });
+      await voting.connect(user2).buy({
+        value: ethers.parseEther('1'),
+      });
+      const min = await voting.minTokenAmount();
+      await vote(data, user2);
+      await vote(data3, user);
+      await vote(data2, user3);
+
+      await voting.connect(user3).sell(4749000);
+      await voting.connect(user).sell(4748000);
+      const tail = Number(await voting.tail());
+      const nodes = await voting.getNodes();
+      await expect(nodes[tail].data.amount).to.equal(2000n);
+    });
+
+    it('should have right voting list order', async () => {
+      const data = {
+        amount: 20,
+        price: 604,
+      };
+      const data2 = {
+        amount: 6000,
+        price: 60,
+      };
+      const data3 = {
+        amount: 5000,
+        price: 10,
+      };
+
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      await voting.connect(user3).buy({
+        value: 5000000,
+      });
+      await voting.connect(user2).buy({
+        value: ethers.parseEther('1'),
+      });
+      const min = await voting.minTokenAmount();
+      console.log(min);
+      await vote(data, user2);
+      await vote(data3, user);
+      await vote(data2, user3);
+
+      await voting.connect(user3).sell(4749000);
+      await voting.connect(user).sell(4748000);
+      await voting.connect(user).sell(1200);
+      const tail = Number(await voting.tail());
+      const nodes = await voting.getNodes();
+      await expect(nodes[tail].data.amount).to.equal(1000n);
+      await expect(nodes[Number(nodes[tail].prev)].data.amount).to.equal(800);
+    });
+
+    it('should have right voting list order', async () => {
+      const data: IData = {
+        amount: 20,
+        price: 600,
+      };
+      const data2: IData = {
+        amount: 6000,
+        price: 60,
+      };
+      const data3: IData = {
         amount: 5000,
         price: 10,
       };
@@ -309,12 +425,15 @@ describe('Voting', () => {
         value: ethers.parseEther('1'),
       });
 
+      await vote(data2, owner);
       await vote(data3, user);
       await vote(data, user2);
-      await vote(data2, owner);
+
+      const index = await voting.voteIndex(
+        await voting.votePrice(owner.address),
+      );
 
       const nodes = await voting.getNodes();
-      console.log(nodes);
 
       const tail = Number(await voting.tail());
       const head = Number(await voting.head());
@@ -337,6 +456,27 @@ describe('Voting', () => {
       const tx = await vote(data, user);
       expect(tx).to.equal(true);
     });
+
+    it('should let vote for same amount', async () => {
+      await voting.connect(user).buy({
+        value: ethers.parseEther('1'),
+      });
+
+      const data = {
+        amount: 20,
+        price: 60,
+      };
+      const data2 = {
+        amount: 2550,
+        price: 60,
+      };
+
+      await vote(data, user);
+      await vote(data2, user);
+
+      expect(await voting.votePrice(user.address)).to.equal(60);
+    });
+
     it('should change voting started time', async () => {
       await voting.connect(user).buy({
         value: ethers.parseEther('1'),
@@ -381,9 +521,9 @@ describe('Voting', () => {
         amount: 20,
         price: 0,
       };
-      await expect(vote(data, user)).to.be.revertedWith(
-        'Data should be positive',
-      );
+      await expect(
+        voting.connect(user).vote(0, 0, data, true),
+      ).to.be.revertedWith('Data should be positive');
     });
 
     it('should stop voting when it possible', async () => {
@@ -527,8 +667,9 @@ describe('Voting', () => {
       );
     });
   });
+
   describe('Fake data', async () => {
-    it('should revert tx on out of bound index', async () => {
+    it('should revert tx on out of bound id', async () => {
       await voting.connect(user).buy({
         value: 4000000,
       });
@@ -542,10 +683,11 @@ describe('Voting', () => {
       };
       await vote(data, user);
       await expect(
-        voting.connect(user2).vote(5, data, true),
-      ).to.be.revertedWith('Invalid index');
+        voting.connect(user2).vote(5, 5, data, true),
+      ).to.be.revertedWith('Invalid id');
     });
-    it('should revert tx on fake index update', async () => {
+
+    it('should revert tx on fake data update', async () => {
       await voting.connect(user).buy({
         value: 4000000,
       });
@@ -564,10 +706,11 @@ describe('Voting', () => {
       await vote(data, user);
 
       await expect(
-        voting.connect(user2).vote(2, data2, true),
+        voting.connect(user2).vote(1, 1, data2, true),
       ).to.be.revertedWith('Invalid data');
     });
-    it('should revert tx on out of bound index', async () => {
+
+    it('should revert tx on out of bound id', async () => {
       await voting.connect(user).buy({
         value: 4000000,
       });
@@ -578,29 +721,91 @@ describe('Voting', () => {
       };
 
       await expect(
-        voting.connect(user).vote(1, data, false),
-      ).to.be.revertedWith('Invalid index');
+        voting.connect(user).vote(1, 5, data, false),
+      ).to.be.revertedWith('Invalid id');
+    });
+
+    it('should revert tx on voting for not same node', async () => {
+      await voting.connect(user).buy({
+        value: 4000000,
+      });
+      await voting.connect(user2).buy({
+        value: 4000000,
+      });
+
+      const data = {
+        price: 20,
+        amount: 50,
+      };
+
+      const data2 = {
+        price: 205,
+        amount: 500,
+      };
+
+      await vote(data, user);
+      await vote(data2, user2);
+
+      await expect(
+        voting.connect(user).vote(1, 1, data2, true),
+      ).to.be.revertedWith('Already voted');
+    });
+
+    it('should revert tx invalid insert id', async () => {
+      await voting.connect(user).buy({
+        value: 4000000,
+      });
+      await voting.connect(user2).buy({
+        value: 4000000,
+      });
+
+      const data = {
+        price: 20,
+        amount: 50,
+      };
+
+      const data2 = {
+        price: 205,
+        amount: 500,
+      };
+
+      await vote(data, user2);
+
+      await expect(
+        voting.connect(user).vote(0, 0, data2, false),
+      ).to.be.revertedWith('Invalid id');
+    });
+
+    it('should revert tx invalid insert id', async () => {
+      await voting.connect(user).buy({
+        value: 4000000,
+      });
+      await voting.connect(user2).buy({
+        value: 4000000,
+      });
+
+      const data = {
+        price: 20,
+        amount: 50,
+      };
+
+      const data2 = {
+        price: 205,
+        amount: 500,
+      };
+
+      await vote(data2, user2);
+      await expect(
+        voting.connect(user).vote(1, 1, data, false),
+      ).to.be.revertedWith('Invalid id');
     });
   });
+
   describe('Transfer', async () => {
     it("should revert tx when user don't have tokens to transfer", async () => {
       await expect(
         voting.connect(user).transfer(user2.address, 3000000),
       ).to.be.revertedWith('Not enough tokens');
-    });
-
-    it('should revert tx when tokens in voting', async () => {
-      await voting.connect(user).buy({
-        value: 4000000,
-      });
-      const data = {
-        price: 20,
-        amount: 3000000,
-      };
-      await vote(data, user);
-      await expect(
-        voting.connect(user).transfer(user2.address, 3000000),
-      ).to.be.revertedWith('Tokens in voting');
     });
 
     it('Should send tokens to other user', async () => {
@@ -614,6 +819,75 @@ describe('Voting', () => {
 
       await expect(user2Balance).to.equal(400000);
     });
+
+    it('should transfer tokens if they in voting', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      const data: IData = {
+        amount: 6000,
+        price: 50,
+      };
+      await vote(data, user);
+
+      await voting.connect(user).transfer(user2.address, 4749000);
+      expect(await voting.balanceOf(user2)).to.equal(4749000);
+    });
+
+    it('should transfer tokens if they in voting 2', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      await voting.connect(user3).buy({
+        value: 5000000,
+      });
+
+      const data: IData = {
+        amount: 6000,
+        price: 50,
+      };
+
+      const data2: IData = {
+        amount: 5000,
+        price: 504,
+      };
+      await vote(data, user);
+      await vote(data2, user3);
+
+      await voting.connect(user).transfer(user2.address, 4749000);
+
+      expect(await voting.balanceOf(user2)).to.equal(4749000);
+    });
+
+    it('should transfer tokens if they in voting', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      await voting.connect(user3).buy({
+        value: 5000000,
+      });
+
+      const data: IData = {
+        amount: 6000,
+        price: 50,
+      };
+
+      const data2: IData = {
+        amount: 5000,
+        price: 50,
+      };
+      await vote(data, user);
+      const nodes = await voting.getNodes();
+      console.log(nodes);
+      await vote(data2, user3);
+
+      await voting.connect(user).transfer(user2.address, 4749000);
+
+      expect(await voting.balanceOf(user2)).to.equal(4749000);
+    });
+
     it('Should emit transfer event', async () => {
       await voting.connect(user).buy({
         value: 4000000,
@@ -637,6 +911,7 @@ describe('Voting', () => {
       await expect(initialBalance - currentBalance).to.equal(400000);
     });
   });
+
   describe('Fee', async () => {
     it('Should burn fee', async () => {
       await voting.connect(user).buy({
@@ -685,6 +960,44 @@ describe('Voting', () => {
       const currentTimestamp = currentBlock?.timestamp;
 
       expect(await voting.lastTimeBurnFee()).to.equal(currentTimestamp);
+    });
+  });
+
+  describe('Double spend', async () => {
+    it('Should prevent double spend', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      await voting.connect(user2).buy({
+        value: 10000000,
+      });
+
+      const data: IData = {
+        amount: 4750000,
+        price: 500,
+      };
+
+      const data2: IData = {
+        amount: 13000000,
+        price: 200,
+      };
+
+      await vote(data, user);
+
+      await voting.connect(user).transfer(user2.address, 4750000);
+
+      expect(await voting.votePower(user.address)).to.equal(0);
+
+      await vote(data2, user2);
+
+      const nodes = await voting.getNodes();
+      const tail = await voting.tail();
+
+      const prevNode = nodes[Number(nodes[Number(tail)].prev)];
+
+      await expect(nodes[Number(tail)].data.amount).to.equal(data2.amount);
+      await expect(prevNode.data.amount).to.equal(0);
     });
   });
 });

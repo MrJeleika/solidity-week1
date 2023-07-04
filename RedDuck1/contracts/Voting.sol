@@ -4,6 +4,7 @@ pragma solidity ^0.8.9;
 
 import "./ERC20.sol";
 import "./utils/SafeMath.sol";
+import "../node_modules/hardhat/console.sol";
 import "./IVoting.sol";
 import "./LinkedList.sol";
 
@@ -36,49 +37,54 @@ contract Voting is ERC20, DoublyLinkedList {
         price = _price;
     }
 
-    // Исправить fee
+    // Исправить fee у минт
     function buy() public payable {
         require(msg.value / price >= 20, "Too small amount");
         uint _fee = (msg.value * fee) / feeDivider;
-        uint _amount = (msg.value) - (_fee);
+        uint _amount = msg.value - _fee;
         mint(_amount / price, msg.sender);
+        mint(_fee / price, _owner);
         votePower[msg.sender] += _amount;
-        feeToBurn += (_fee) / price;
-        balances[_owner] += (_fee) / price;
+        feeToBurn += _fee / price;
     }
 
-    // Исправить fee
     function sell(uint256 _amount) public {
-        require(balanceOf(msg.sender) >= _amount, "Not enough tokens to sell");
+        uint256 balance = balanceOf(msg.sender);
+        require(balance >= _amount, "Not enough tokens to sell");
+        require(_amount >= 20, "Too small amount");
         uint _fee = (_amount * fee) / feeDivider;
-        burn(_amount - _fee, msg.sender);
-        if(balanceOf(msg.sender) < votePower[msg.sender]){
-            uint index = voteIndex[votePrice[msg.sender]];
-            votePower[msg.sender] = balanceOf(msg.sender);
-        }else{
-            votePower[msg.sender] -= _amount;
-        }
+        burn(_amount, msg.sender);
+        mint(_fee, _owner);
+        checkAndMinusTokens(_amount, msg.sender, balance);
         feeToBurn += fee;
-        balances[_owner] += fee;
         payable(msg.sender).transfer(((_amount - _fee) * price));
     }
 
-    function vote(uint256 index, Data calldata data, bool existingNode) public returns (bool) {
+    function vote(uint256 indexToInsert, uint256 indexOfExisting, Data memory data, bool existingNode) public returns (bool) {
         require(votePower[msg.sender] >= data.amount, "Not enough voting power");
         require(data.price > 0 && data.amount > 0, "Data should be positive");
-        require(!isVoted[msg.sender], "Already voted");
         if (votingStartedTime == 0) {
             votingStartedTime = block.timestamp;
             emit VotingStarted(votingStartedTime);
         }
-
+        uint index;
         if (existingNode) {
-            increaseAmount(index, data);
+            require(votePrice[msg.sender] == data.price || votePrice[msg.sender] == 0, "Already voted");
+            if(indexToInsert == indexOfExisting){
+                increaseAmount(indexOfExisting, data);
+                index = indexOfExisting;
+            }else{
+                remove(indexOfExisting);
+                index = insertAfter(indexToInsert, data);
+            }
         } else {
+            require(votePrice[msg.sender] == 0, "Already voted");
             require(balanceOf(msg.sender) >= minTokenAmount, "Hold at least 0.05% of all tokens to start voting");
-            insertAfter(index, data);
+            index = insertAfter(indexToInsert, data);
         }
 
+        votePrice[msg.sender] = data.price;
+        voteIndex[data.price] = index;
         isVoted[msg.sender] = true;
         votePower[msg.sender] -= data.amount;
         return true;
@@ -98,13 +104,36 @@ contract Voting is ERC20, DoublyLinkedList {
         price = nodes[tail].data.price == 0 ? price : nodes[tail].data.amount;
     }
 
-    function transfer(address recipient, uint256 amount) external override returns (bool) {
-        require(balanceOf(msg.sender) >= amount, "Not enough tokens");
-        require(votePower[msg.sender] >= amount, "Tokens in voting");
-        balances[msg.sender] -= amount;
-        balances[recipient] += amount;
-        emit Transfer(msg.sender, recipient, amount);
+
+
+    function transfer(address recipient, uint256 _amount) external override returns (bool) {
+        uint256 balance = balanceOf(msg.sender);
+        require(balance >= _amount, "Not enough tokens");
+        checkAndMinusTokens(_amount, msg.sender, balance);
+        balances[msg.sender] -= _amount;
+        balances[recipient] += _amount;
+        votePower[recipient] += _amount;
+        feeToBurn += fee;
+        emit Transfer(msg.sender, recipient, _amount);
         return true;
+    }
+
+    function checkAndMinusTokens(uint256 _amount, address sender, uint256 balance) internal {
+        if(votePower[sender] < _amount ){
+            uint _price = votePrice[sender];
+            uint index = voteIndex[_price];
+            (uint indexToInsert, uint currAmount) = findIndexToInsert(index, _amount - votePower[sender]);
+            if(indexToInsert == index){
+                decreaseAmount(index, Data(votePrice[sender], _amount - votePower[sender]));
+            }else{
+                remove(index);
+                insertAfter(indexToInsert, Data(votePrice[sender], currAmount));
+                voteIndex[votePrice[sender]] = indexToInsert;
+            }
+            votePower[sender] = 0;
+        }else{
+            votePower[sender] = balance - _amount;
+        }
     }
 
     modifier onlyOwner() {
