@@ -44,11 +44,11 @@ describe('Voting', () => {
    * @param data - data of that node
    * @returns [index, amount] - new index to insert data
    */
-  const recountNodes = async (indexOfExistingNode: number, data: IData) => {
+  const recountNodes = async (indexOfExistingNode: number, amount: number) => {
     let nodes = await voting.getNodes();
     let currentNode = nodes[indexOfExistingNode];
     let index = 0;
-    const currAmount = Number(currentNode.data.amount) + Number(data.amount);
+    const currAmount = Number(currentNode.data.amount) + amount;
 
     let prevNode, nextNode;
 
@@ -78,6 +78,7 @@ describe('Voting', () => {
     } else if (prevNode.data.amount > currAmount) {
       while (prevNode.data.amount > currAmount) {
         if (prevNode.prev === ethers.MaxUint256) {
+          index = Number(currentNode.prev);
           currentNode = prevNode;
           break;
         }
@@ -86,6 +87,8 @@ describe('Voting', () => {
       }
       index = Number(nodes[Number(currentNode.next)].prev);
     }
+    console.log(index);
+
     return [index, currAmount];
   };
 
@@ -104,10 +107,8 @@ describe('Voting', () => {
     if (indexOfExistingNode >= 0) {
       const [indexToInsert, amount] = await recountNodes(
         indexOfExistingNode,
-        data,
+        Number(data.amount),
       );
-
-      data.amount = amount;
       if (indexToInsert == indexOfExistingNode) {
         await voting
           .connect(_user)
@@ -127,6 +128,74 @@ describe('Voting', () => {
     // 0 just any value
     await voting.connect(_user).vote(index, 0, data, false);
     return true;
+  };
+
+  const findIndexToInsert = async (
+    indexOfExistingNode: number,
+    amount: number,
+  ) => {
+    if (indexOfExistingNode == 0) return [ethers.MaxUint256, 0];
+    const nodes = await voting.getNodes();
+    let currentNode = nodes[indexOfExistingNode];
+    const currAmount = Number(currentNode.data.amount) - amount;
+    if (currentNode.prev === ethers.MaxUint256)
+      return [indexOfExistingNode, currAmount];
+    let index = indexOfExistingNode;
+    let prevNode = nodes[Number(currentNode.prev)];
+
+    if (prevNode.data.amount > currAmount) {
+      while (prevNode.data.amount > currAmount) {
+        if (prevNode.prev === ethers.MaxUint256) {
+          currentNode = prevNode;
+          break;
+        }
+        currentNode = prevNode;
+        prevNode = nodes[Number(currentNode.prev)];
+      }
+      index = Number(currentNode.prev);
+    }
+    return [index, currAmount];
+  };
+
+  const voterSell = async (amount: number, user: HardhatEthersSigner) => {
+    const votePower = await voting.votePower(user.address);
+    const price = Number(await voting.votePrice(user.address));
+    const indexOfExistingNode = Number(await voting.voteIndex(price));
+    const [indexToInsert, currAmount] = await findIndexToInsert(
+      indexOfExistingNode,
+      amount - Number(votePower),
+    );
+    if (votePower < BigInt(amount)) {
+      if (indexToInsert == ethers.MaxUint256) return;
+      await voting.connect(user).voterSell(amount, indexToInsert, currAmount);
+    } else {
+      await voting.connect(user).voterSell(amount, 0, currAmount);
+    }
+  };
+
+  const voterTransfer = async (
+    amount: number,
+    recipient: string,
+    user: HardhatEthersSigner,
+  ) => {
+    const votePower = await voting.votePower(user.address);
+    const price = Number(await voting.votePrice(user.address));
+    const indexOfExistingNode = Number(await voting.voteIndex(price));
+    const [indexToInsert, currAmount] = await findIndexToInsert(
+      indexOfExistingNode,
+      amount - Number(votePower),
+    );
+
+    if (votePower < BigInt(amount)) {
+      if (indexToInsert == ethers.MaxUint256) return;
+      await voting
+        .connect(user)
+        .voterTransfer(recipient, amount, indexToInsert, currAmount);
+    } else {
+      await voting
+        .connect(user)
+        .voterTransfer(recipient, amount, 0, currAmount);
+    }
   };
 
   const name = 'Jaba';
@@ -246,6 +315,22 @@ describe('Voting', () => {
       );
     });
 
+    it('Should be reverted try to sell voted tokens', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      const data = {
+        amount: 5000,
+        price: 100,
+      };
+
+      await vote(data, user);
+      await expect(voting.connect(user).sell(4748000)).to.be.revertedWith(
+        'Use voterSell for voted tokens',
+      );
+    });
+
     it('Should be reverted to small amount', async () => {
       await voting.connect(user).buy({
         value: 500000,
@@ -321,7 +406,6 @@ describe('Voting', () => {
       const nodes = await voting.getNodes();
       const tail = Number(await voting.tail());
       const head = Number(await voting.head());
-      console.log(nodes);
 
       await expect(nodes[tail].data.amount).to.equal(5000n);
       await expect(nodes[Number(nodes[tail].prev)].data.amount).to.equal(70n);
@@ -351,13 +435,12 @@ describe('Voting', () => {
       await voting.connect(user2).buy({
         value: ethers.parseEther('1'),
       });
-      const min = await voting.minTokenAmount();
       await vote(data, user2);
       await vote(data3, user);
       await vote(data2, user3);
 
-      await voting.connect(user3).sell(4749000);
-      await voting.connect(user).sell(4748000);
+      await voterSell(4749000, user3);
+      await voterSell(4748000, user);
       const tail = Number(await voting.tail());
       const nodes = await voting.getNodes();
       await expect(nodes[tail].data.amount).to.equal(2000n);
@@ -386,15 +469,14 @@ describe('Voting', () => {
       await voting.connect(user2).buy({
         value: ethers.parseEther('1'),
       });
-      const min = await voting.minTokenAmount();
-      console.log(min);
+
       await vote(data, user2);
       await vote(data3, user);
       await vote(data2, user3);
 
-      await voting.connect(user3).sell(4749000);
-      await voting.connect(user).sell(4748000);
-      await voting.connect(user).sell(1200);
+      await voterSell(4749000, user3);
+      await voterSell(4748000, user);
+      await voterSell(1200, user);
       const tail = Number(await voting.tail());
       const nodes = await voting.getNodes();
       await expect(nodes[tail].data.amount).to.equal(1000n);
@@ -820,7 +902,7 @@ describe('Voting', () => {
       await expect(user2Balance).to.equal(400000);
     });
 
-    it('should transfer tokens if they in voting', async () => {
+    it('shouldnt transfer tokens if they in voting', async () => {
       await voting.connect(user).buy({
         value: 5000000,
       });
@@ -830,62 +912,9 @@ describe('Voting', () => {
       };
       await vote(data, user);
 
-      await voting.connect(user).transfer(user2.address, 4749000);
-      expect(await voting.balanceOf(user2)).to.equal(4749000);
-    });
-
-    it('should transfer tokens if they in voting 2', async () => {
-      await voting.connect(user).buy({
-        value: 5000000,
-      });
-
-      await voting.connect(user3).buy({
-        value: 5000000,
-      });
-
-      const data: IData = {
-        amount: 6000,
-        price: 50,
-      };
-
-      const data2: IData = {
-        amount: 5000,
-        price: 504,
-      };
-      await vote(data, user);
-      await vote(data2, user3);
-
-      await voting.connect(user).transfer(user2.address, 4749000);
-
-      expect(await voting.balanceOf(user2)).to.equal(4749000);
-    });
-
-    it('should transfer tokens if they in voting', async () => {
-      await voting.connect(user).buy({
-        value: 5000000,
-      });
-
-      await voting.connect(user3).buy({
-        value: 5000000,
-      });
-
-      const data: IData = {
-        amount: 6000,
-        price: 50,
-      };
-
-      const data2: IData = {
-        amount: 5000,
-        price: 50,
-      };
-      await vote(data, user);
-      const nodes = await voting.getNodes();
-      console.log(nodes);
-      await vote(data2, user3);
-
-      await voting.connect(user).transfer(user2.address, 4749000);
-
-      expect(await voting.balanceOf(user2)).to.equal(4749000);
+      await expect(
+        voting.connect(user).transfer(user2.address, 4749000),
+      ).to.be.revertedWith('Use voteTranser for voted tokens');
     });
 
     it('Should emit transfer event', async () => {
@@ -985,7 +1014,7 @@ describe('Voting', () => {
 
       await vote(data, user);
 
-      await voting.connect(user).transfer(user2.address, 4750000);
+      await voterTransfer(4750000, user2.address, user);
 
       expect(await voting.votePower(user.address)).to.equal(0);
 
@@ -998,6 +1027,177 @@ describe('Voting', () => {
 
       await expect(nodes[Number(tail)].data.amount).to.equal(data2.amount);
       await expect(prevNode.data.amount).to.equal(0);
+    });
+  });
+
+  describe('Vote Sell', async () => {
+    it('Sell', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      const data: IData = {
+        amount: 5000,
+        price: 500,
+      };
+      await vote(data, user);
+
+      await voterSell(4740000, user);
+      expect(await voting.votePower(user.address)).to.equal(5000);
+    });
+
+    it('Vote and sell', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      await voting.connect(user2).buy({
+        value: 5000000,
+      });
+      const data: IData = {
+        amount: 5000,
+        price: 500,
+      };
+      const data2: IData = {
+        amount: 4000,
+        price: 200,
+      };
+      await vote(data, user);
+      await vote(data2, user2);
+      await voterSell(4748000, user);
+
+      expect(await voting.votePower(user.address)).to.equal(0);
+    });
+
+    it('Vote more and sell more', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+      await voting.connect(user3).buy({
+        value: 5000000,
+      });
+      await voting.connect(user2).buy({
+        value: 5000000,
+      });
+      const data: IData = {
+        amount: 5000,
+        price: 500,
+      };
+      const data2: IData = {
+        amount: 4000,
+        price: 200,
+      };
+      await vote(data, user);
+      await voterSell(4748000, user);
+      await vote(data, user3);
+      await vote(data2, user2);
+
+      expect(await voting.votePower(user.address)).to.equal(0);
+    });
+  });
+
+  describe('Vote transfer', async () => {
+    it('should transfer while in vote', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      const data: IData = {
+        amount: 5000,
+        price: 500,
+      };
+      await vote(data, user);
+
+      await voterTransfer(4748000, user2.address, user);
+
+      expect(await voting.balanceOf(user2.address)).to.equal(4748000);
+      const nodes = await voting.getNodes();
+      const tail = await voting.tail();
+      expect(nodes[Number(tail)].data.amount).to.equal(2000);
+    });
+
+    it('should revert tx when not enough tokens to transfer', async () => {
+      await voting.connect(user).buy({
+        value: 50000000000,
+      });
+
+      await await expect(
+        voting.voterTransfer(user2.address, 500000000000, 0, 500),
+      ).to.be.revertedWith('Not enough tokens');
+    });
+
+    it('should transfer while in vote', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      await voting.connect(user2).buy({
+        value: 5000000,
+      });
+
+      const data: IData = {
+        amount: 5000,
+        price: 500,
+      };
+
+      const data2: IData = {
+        amount: 4000,
+        price: 5000,
+      };
+
+      await vote(data, user);
+      await vote(data2, user2);
+
+      await voterTransfer(4748000, user3.address, user);
+
+      expect(await voting.balanceOf(user3.address)).to.equal(4748000);
+      const nodes = await voting.getNodes();
+      const tail = await voting.tail();
+      expect(nodes[Number(tail)].data.amount).to.equal(4000);
+    });
+
+    it('should transfer while not in vote', async () => {
+      await voting.connect(user).buy({
+        value: 5000000,
+      });
+
+      await voting.connect(user).voterTransfer(user3.address, 4748000, 0, 300);
+
+      expect(await voting.balanceOf(user3.address)).to.equal(4748000);
+    });
+  });
+
+  describe('Vote sell', async () => {
+    it('should sell tokens that not in voting', async () => {
+      await voting.connect(user).buy({
+        value: 50000000000,
+      });
+
+      const initialBalance = await ethers.provider.getBalance(user.address);
+
+      await voterSell(5000000000, user);
+
+      expect(await ethers.provider.getBalance(user.address)).be.gt(
+        initialBalance,
+      );
+    });
+
+    it('should revert tx when not enough tokens to sell', async () => {
+      await voting.connect(user).buy({
+        value: 50000000000,
+      });
+
+      await await expect(
+        voting.connect(user).voterSell(500000000000, 0, 500),
+      ).to.be.revertedWith('Not enough tokens to sell');
+    });
+
+    it('should revert tx when too small amount', async () => {
+      await voting.connect(user).buy({
+        value: 50000000000,
+      });
+
+      await await expect(
+        voting.connect(user).voterSell(19, 0, 500),
+      ).to.be.revertedWith('Too small amount');
     });
   });
 });
