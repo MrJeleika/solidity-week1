@@ -71,26 +71,11 @@ contract Voting is ERC20, DoublyLinkedList {
         uint256 balance = balanceOf(msg.sender);
         require(balance >= _amount, "Not enough tokens to sell");
         require(_amount >= 20, "Too small amount");
-     
-        if (votePower[msg.sender] < _amount) {
-            uint _price = votePrice[msg.sender];
-            uint index = voteIndex[_price];
-            if (indexToInsert == index) {
-                decreaseAmount(index, Data(_price, _amount - votePower[msg.sender]));
-            } else {
-                remove(index);
-                insertAfter(indexToInsert, Data(_price, currAmount));
-                voteIndex[_price] = indexToInsert;
-            }
-            votePower[msg.sender] = 0;
-        } else {
-            votePower[msg.sender] -= _amount;
-        }
+        checkVoteDecreaseAmount(_amount, indexToInsert, currAmount, msg.sender);
         uint _fee = (_amount * fee) / feeDivider;
         burn(_amount, msg.sender);
         mint(_fee, _owner);
         feeToBurn += fee;
-   
         payable(msg.sender).transfer(((_amount - _fee) * price));
     }
 
@@ -157,26 +142,31 @@ contract Voting is ERC20, DoublyLinkedList {
     function voterTransfer(address recipient, uint256 _amount, uint256 indexToInsert, uint256 currAmount) external {
         uint256 balance = balanceOf(msg.sender);
         require(balance >= _amount, "Not enough tokens");
-        if (votePower[msg.sender] < _amount) {
-            uint _price = votePrice[msg.sender];
-            uint index = voteIndex[_price];
-            if (indexToInsert == index) {
-                decreaseAmount(index, Data(_price, _amount - votePower[msg.sender]));
-            } else {
-                remove(index);
-                insertAfter(indexToInsert, Data(_price, currAmount));
-                voteIndex[_price] = indexToInsert;
-            }
-            votePower[msg.sender] = 0;
-        } else {
-            votePower[msg.sender] -= _amount;
-        }
+        checkVoteDecreaseAmount(_amount, indexToInsert, currAmount, msg.sender);
         balances[msg.sender] -= _amount;
         balances[recipient] += _amount;
         votePower[recipient] += _amount;
         emit Transfer(msg.sender, recipient, _amount);
     }
-    
+
+    function checkVoteDecreaseAmount(uint256 _amount, uint256 indexToInsert, uint256 currAmount, address sender) internal {
+        uint256 power = votePower[sender];
+        if (power < _amount) {
+            uint _price = votePrice[sender];
+            uint index = voteIndex[_price];
+            if (indexToInsert == index) {
+                decreaseAmount(index, Data(_price, _amount - power));
+            } else {
+                remove(index);
+                insertAfter(indexToInsert, Data(_price, currAmount));
+                voteIndex[_price] = indexToInsert;
+            }
+            votePower[sender] = 0;
+        } else {
+            votePower[sender] -= _amount;
+        }
+    }
+
     modifier onlyOwner() {
         require(msg.sender == _owner, "You aren't an owner");
         _;

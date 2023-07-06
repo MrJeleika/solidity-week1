@@ -87,7 +87,6 @@ describe('Voting', () => {
       }
       index = Number(nodes[Number(currentNode.next)].prev);
     }
-    console.log(index);
 
     return [index, currAmount];
   };
@@ -166,7 +165,7 @@ describe('Voting', () => {
       amount - Number(votePower),
     );
     if (votePower < BigInt(amount)) {
-      if (indexToInsert == ethers.MaxUint256) return;
+      if (indexToInsert === ethers.MaxUint256) return;
       await voting.connect(user).voterSell(amount, indexToInsert, currAmount);
     } else {
       await voting.connect(user).voterSell(amount, 0, currAmount);
@@ -187,7 +186,7 @@ describe('Voting', () => {
     );
 
     if (votePower < BigInt(amount)) {
-      if (indexToInsert == ethers.MaxUint256) return;
+      if (indexToInsert === ethers.MaxUint256) return;
       await voting
         .connect(user)
         .voterTransfer(recipient, amount, indexToInsert, currAmount);
@@ -769,6 +768,24 @@ describe('Voting', () => {
       ).to.be.revertedWith('Invalid id');
     });
 
+    it('should revert tx on out of bound id', async () => {
+      await voting.connect(user).buy({
+        value: 4000000,
+      });
+      await voting.connect(user2).buy({
+        value: 4000000,
+      });
+
+      const data = {
+        price: 20,
+        amount: 50,
+      };
+      await vote(data, user);
+      await expect(
+        voting.connect(user2).vote(5, 5, data, true),
+      ).to.be.revertedWith('Invalid id');
+    });
+
     it('should revert tx on fake data update', async () => {
       await voting.connect(user).buy({
         value: 4000000,
@@ -1168,12 +1185,12 @@ describe('Voting', () => {
   describe('Vote sell', async () => {
     it('should sell tokens that not in voting', async () => {
       await voting.connect(user).buy({
-        value: 50000000000,
+        value: ethers.parseEther('1'),
       });
 
       const initialBalance = await ethers.provider.getBalance(user.address);
 
-      await voterSell(5000000000, user);
+      await voterSell(500000000000000, user);
 
       expect(await ethers.provider.getBalance(user.address)).be.gt(
         initialBalance,
